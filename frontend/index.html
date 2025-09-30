@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Validator System</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Sistem Validasi Laporan</h1>
+        
+        <form id="uploadForm" class="upload-form">
+            <div class="file-input-container">
+                <label for="fileInput">Pilih File PDF:</label>
+                <input type="file" id="fileInput" accept=".pdf" required multiple>
+                <div class="file-info">Maksimal ukuran file: 200MB</div>
+            </div>
+            
+            <button type="submit" id="uploadButton">Unggah dan Validasi</button>
+        </form>
+
+        <div id="progressContainer" class="progress-container" style="display: none;">
+            <div id="progressBar" class="progress-bar"></div>
+            <span id="progressText" class="progress-text">0%</span>
+        </div>
+        
+        <div id="message"></div>
+    </div>
+
+    <script src="js/scripts.js"></script>
+</body>
+</html>
