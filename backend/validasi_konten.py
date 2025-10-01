@@ -3,9 +3,55 @@
 
 import re
 import json
-import google.generativeai as genai
 from typing import List, Dict, Any
 from json_repair import repair_json
+
+from backend.konteks_extractor import get_indobert_model_and_tokenizer
+
+ATURAN_VALIDASI = {
+    "BAUT": {
+        "nama_dokumen": "Berita Acara Uji Terima",
+        "field_wajib": [
+            "PROYEK",
+            "KONTRAK",
+            "WITEL",
+            "DISTRICT",
+            "LOKASI",
+            "PELAKSANA",
+            "NO_BAUT",
+            "TANGGAL",
+            "SP",
+            "S_PERMOHONAN"
+
+            # Tambahkan field lain yang spesifik untuk BAUT
+        ],
+        # Kata kunci untuk membantu identifikasi otomatis di masa depan
+        "frasa_kunci_identifikasi": ["UJI TERIMA", "BAUT"] 
+    },
+    "BACT": {
+        "nama_dokumen": "Berita Acara Commissioning Test",
+        "field_wajib": [
+            "PROYEK",
+            "KONTRAK",
+            "WITEL",
+            "DISTRICT",
+            "LOKASI",
+            "PELAKSANA",
+            "TANGGAL",
+            "HARI",
+            "BULAN",
+            "TAHUN"
+            # Tambahkan field lain yang spesifik untuk BACT
+        ],
+        "frasa_kunci_identifikasi": ["COMMISSIONING TEST", "BACT", "BATC"]
+    },
+    "UMUM": {
+        "nama_dokumen": "Dokumen Umum",
+        "field_wajib": [
+            "PROYEK" # Mungkin hanya proyek yang wajib untuk dokumen tak dikenal
+        ]
+    }
+    }
 
 def cek_kelengkapan_dokumen(laporan_kontekstual: List[Dict[str, Any]], aturan_kelengkapan: Dict[str, List[str]]) -> Dict[str, Any]:
     """
@@ -55,189 +101,169 @@ def cek_kelengkapan_dokumen(laporan_kontekstual: List[Dict[str, Any]], aturan_ke
         "frasa_tidak_ditemukan": frasa_tidak_ditemukan
     }
 
-# Di dalam file backend/validasi_konten.py
+# Di dalam backend/validasi_konten.py
 
-def _gabungkan_token_menjadi_entitas(hasil_analisis: list) -> list:
-    """Fungsi ini tidak berubah, hanya memastikan outputnya urut."""
-    if not hasil_analisis:
+def _gabungkan_token_menjadi_entitas(hasil_analisis_kontekstual: list) -> list:
+    """
+    Fungsi yang sudah diperbaiki untuk menggabungkan token menjadi entitas utuh.
+    Fungsi ini sekarang menerima daftar token secara langsung.
+    """
+    if not hasil_analisis_kontekstual:
         return []
+
     entitas_dict = {}
-    for token_data in hasil_analisis:
+    # Langsung iterasi ke input karena sudah berupa list of dictionaries
+    for token_data in hasil_analisis_kontekstual:
+        # Kunci unik adalah gabungan dari koordinat box dan label
         key = (tuple(token_data["box"]), token_data["label"])
+        
         if key not in entitas_dict:
-            entitas_dict[key] = {"tokens": []}
+            entitas_dict[key] = {
+                "tokens": [],
+                "halaman_asal": token_data.get('halaman_asal', 1) # Simpan halaman jika ada
+            }
+        
         entitas_dict[key]["tokens"].append(token_data["token"])
 
     entitas_final = []
     for (box, label), data in entitas_dict.items():
         teks_lengkap = "".join(data["tokens"]).replace("Ġ", " ").strip()
-        # Simpan juga informasi halaman asal
-        halaman_asal = 1 # Default
-        for token_data in hasil_analisis:
-            if tuple(token_data["box"]) == key[0] and token_data["label"] == key[1]:
-                halaman_asal = token_data.get('halaman_asal')
-                break
         
         if teks_lengkap:
             entitas_final.append({
                 "text": teks_lengkap,
                 "box": list(box),
                 "label": label,
-                "halaman_asal": halaman_asal
+                "halaman_asal": data["halaman_asal"]
             })
-    # Urutkan entitas berdasarkan halaman, lalu posisi Y, lalu posisi X
-    entitas_final.sort(key=lambda e: (e.get('halaman_asal', 1), e["box"][1], e["box"][0]))
+            
+    # Urutkan entitas berdasarkan posisi Y, lalu posisi X
+    entitas_final.sort(key=lambda e: (e["box"][1], e["box"][0]))
     return entitas_final
 
-# Di dalam file backend/validasi_konten.py
-
-def rekonstruksi_key_value(semua_hasil_analisis_dokumen: list) -> dict:
-    """
-    Versi Hibrida: Menggabungkan pemasangan berbasis baris (horizontal)
-    dan berbasis kolom (vertikal) untuk akurasi maksimal.
-    """
-    print("   - Memulai rekonstruksi Key-Value (versi hibrida)...")
-    entitas = _gabungkan_token_menjadi_entitas(semua_hasil_analisis_dokumen)
+def tata_ulang_dengan_indobert_lokal(final_entities: list) -> dict:
     
-    hasil_per_halaman = {}
-    if not entitas:
-        return {}
-
-    # Kelompokkan entitas berdasarkan halaman
-    entitas_per_halaman = {}
-    for ent in entitas:
-        halaman = ent.get('halaman_asal', 1)
-        if halaman not in entitas_per_halaman:
-            entitas_per_halaman[halaman] = []
-        entitas_per_halaman[halaman].append(ent)
-
-    # Proses halaman per halaman
-    for halaman, entitas_di_halaman in entitas_per_halaman.items():
-        pasangan_kv = {}
-        # Tandai entitas yang sudah dipasangkan
-        sudah_dipasangkan = set()
-
-        # --- TAHAP 1: PEMASANGAN HORIZONTAL (KASUS MUDAH) ---
-        lines = []
-        if entitas_di_halaman:
-            # Kelompokkan entitas menjadi baris-baris
-            entitas_di_halaman.sort(key=lambda e: (e['box'][1], e['box'][0]))
-            current_line = [entitas_di_halaman[0]]
-            for i in range(1, len(entitas_di_halaman)):
-                prev_ent = current_line[-1]
-                curr_ent = entitas_di_halaman[i]
-                if abs(((prev_ent['box'][1] + prev_ent['box'][3]) / 2) - ((curr_ent['box'][1] + curr_ent['box'][3]) / 2)) < 10:
-                    current_line.append(curr_ent)
-                else:
-                    lines.append(sorted(current_line, key=lambda e: e['box'][0]))
-                    current_line = [curr_ent]
-            lines.append(sorted(current_line, key=lambda e: e['box'][0]))
-
-        # Proses setiap baris untuk menemukan pasangan kiri-kanan
-        for i, line in enumerate(lines):
-            keys_in_line = [(idx, e) for idx, e in enumerate(line) if e['label'].endswith(("_KEY", "_HEADER"))]
-            values_in_line = [(idx, e) for idx, e in enumerate(line) if e['label'].endswith("_VALUE")]
-
-            if keys_in_line and values_in_line:
-                key_text = " ".join(k[1]['text'] for k in keys_in_line).replace(":", "").strip()
-                value_text = " ".join(v[1]['text'] for v in values_in_line).strip()
-                if key_text and value_text:
-                    pasangan_kv[key_text] = value_text
-                    # Tandai semua entitas di baris ini sebagai sudah dipasangkan
-                    for ent in line:
-                        sudah_dipasangkan.add(tuple(ent['box']))
-        
-        # --- TAHAP 2: PEMASANGAN VERTIKAL (KASUS SULIT SEPERTI TANDA TANGAN) ---
-        keys_tersisa = [e for e in entitas_di_halaman if e['label'].endswith(("_KEY", "_HEADER")) and tuple(e['box']) not in sudah_dipasangkan]
-        values_tersisa = [e for e in entitas_di_halaman if e['label'].endswith("_VALUE") and tuple(e['box']) not in sudah_dipasangkan]
-
-        for key_ent in keys_tersisa:
-            key_box = key_ent['box']
-            key_text = key_ent['text'].replace(":", "").strip()
-            if not key_text: continue
-
-            kandidat_terbaik = None
-            jarak_terdekat = float('inf')
-
-            for val_ent in values_tersisa:
-                val_box = val_ent['box']
-                # Cari value yang ada DI BAWAH key
-                if val_box[1] > key_box[3]:
-                    # Cek apakah mereka tumpang tindih secara horizontal (berada di kolom yang sama)
-                    overlap_x = max(0, min(key_box[2], val_box[2]) - max(key_box[0], val_box[0]))
-                    if overlap_x > 0: # Jika ada tumpang tindih di sumbu X
-                        jarak = val_box[1] - key_box[3] # Jarak vertikal
-                        if jarak < jarak_terdekat:
-                            jarak_terdekat = jarak
-                            kandidat_terbaik = val_ent
-            
-            if kandidat_terbaik:
-                pasangan_kv[key_text] = kandidat_terbaik['text']
-                # Tandai keduanya agar tidak digunakan lagi
-                sudah_dipasangkan.add(tuple(key_ent['box']))
-                sudah_dipasangkan.add(tuple(kandidat_terbaik['box']))
-        
-        # Simpan hasil untuk halaman ini jika ada
-        if pasangan_kv:
-            hasil_per_halaman[str(halaman)] = pasangan_kv
-
-    print(f"   - Rekonstruksi selesai.")
-    return hasil_per_halaman
-
-# Di file: backend/validasi_konten.py
-
-def tata_ulang_dengan_llm(entitas_per_halaman: dict, api_key: str) -> dict:
     """
-    Menggunakan LLM untuk membersihkan dan menata ulang hasil ekstraksi mentah dari LayoutLM.
+    Menggunakan model IndoBERT lokal untuk menata ulang entitas mentah menjadi JSON terstruktur.
+    'final_entities' adalah list hasil olahan dari LayoutLMv3.
     """
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    if not final_entities:
+        return {"error": "Tidak ada entitas yang diterima untuk diproses."}
 
-    prompt_input_text = "Data Ekstraksi Mentah:\n"
-    for page, entities in entitas_per_halaman.items():
-        prompt_input_text += f"\n--- Halaman {page} ---\n"
-        for ent in entities:
-            prompt_input_text += f"- Teks: '{ent['text']}', Label: {ent['label']}\n"
-    
-    instruction_prompt = f"""
-    Anda adalah AI ahli yang tugasnya membersihkan data ekstraksi dari dokumen.
-    Di bawah ini adalah daftar teks dan label yang diekstrak dari beberapa halaman dokumen.
-    Tugas Anda adalah menata ulang data ini menjadi format JSON yang bersih dan logis.
+    # 1. Buat 'input_text' dari final_entities
+    # Logika ini sama persis dengan yang kita gunakan di create_bert_dataset.py
+    input_lines = []
+    for entity in final_entities:
+        line = f"teks: \"{entity['text']}\" box: {entity['box']}"
+        input_lines.append(line)
+    input_text = "\n".join(input_lines)
 
-    Aturan:
-    1. Kelompokkan hasil per halaman. Kunci utama adalah nomor halaman dalam bentuk string.
-    2. Pasangkan KEY dan VALUE yang paling relevan. Jangan membuat kunci duplikat.
-    3. Abaikan entitas yang tidak relevan atau aneh.
-    4. Kembalikan HANYA JSON hasil akhir tanpa teks penjelasan atau markdown.
+    # 2. Panggil getter untuk mendapatkan model dan tokenizer yang sudah pasti terisi
+    brain_model, brain_tokenizer = get_indobert_model_and_tokenizer()
 
-    {prompt_input_text}
+    # 3. Lakukan Tokenisasi (gunakan variabel lokal)
+    inputs = brain_tokenizer(input_text, padding="max_length", truncation=True, max_length=512, return_tensors="pt")
 
-    JSON Hasil Akhir:
-    """
-    
-    # Menghapus semua print() yang tidak perlu dari sini
-    
-    json_text_untuk_debug = "" 
+    # --- PENJAGA FINAL DITAMBAHKAN DI SINI ---
+    # Periksa apakah hasil tokenisasi menghasilkan input yang valid.
+    # tensor.nelement() menghitung jumlah total elemen dalam tensor.
+    if inputs.input_ids.nelement() == 0:
+        print("[PERINGATAN] Tokenizer menghasilkan input kosong, tidak dapat menjalankan model 'Otak'.")
+        return {"error": "Tokenizer gagal menghasilkan token yang valid dari teks input."}
+    # --- AKHIR DARI PENJAGA ---
+
+    # 4. Jalankan Inferensi (gunakan variabel lokal)
+    output_ids = brain_model.generate(
+        inputs.input_ids,
+        attention_mask=inputs.attention_mask,
+        max_length=512,
+        num_beams=4,
+        early_stopping=True,
+        decoder_start_token_id=brain_tokenizer.cls_token_id
+    )
+
+    # 5. Decode Hasilnya (gunakan variabel lokal)
+    predicted_json_string = brain_tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+    # 5. Coba parse dan perbaiki JSON jika perlu
     try:
-        response = model.generate_content(instruction_prompt)
-        response_text = response.text
+        # Langsung coba parse
+        return json.loads(predicted_json_string)
+    except json.JSONDecodeError:
+        print("[PERINGATAN] Output model bukan JSON valid. Mencoba memperbaiki...")
+        try:
+            # Jika gagal, coba perbaiki dengan json_repair
+            repaired_json = repair_json(predicted_json_string)
+            return json.loads(repaired_json)
+        except Exception as e:
+            print(f"[ERROR] Gagal memperbaiki JSON. Error: {e}")
+            return {"error": "Gagal menghasilkan JSON yang valid dari model.", "raw_output": predicted_json_string}
         
-        start_index = response_text.find('{')
-        end_index = response_text.rfind('}')
+def cek_validitas_isian_data(data_terstruktur: dict, tipe_dokumen: str) -> dict:
+    """
+    Memvalidasi apakah field-field wajib dalam data terstruktur sudah diisi.
+    """
 
-        if start_index != -1 and end_index != -1 and end_index > start_index:
-            json_text_untuk_debug = response_text[start_index : end_index + 1]
-            try:
-                return json.loads(json_text_untuk_debug)
-            except json.JSONDecodeError:
-                try:
-                    repaired_json_text = repair_json(json_text_untuk_debug)
-                    return json.loads(repaired_json_text)
-                except Exception as e_repair:
-                    return {"error": f"Gagal memperbaiki dan mengonversi JSON: {e_repair}", "raw_text": json_text_untuk_debug}
+
+    aturan = ATURAN_VALIDASI.get(tipe_dokumen, ATURAN_VALIDASI["UMUM"])
+    FIELD_WAJIB = aturan["field_wajib"]
+
+    # Periksa jika inputnya adalah dictionary error dari langkah sebelumnya
+    if "error" in data_terstruktur:
+        return {
+            "status": "GAGAL",
+            "message": "Tidak dapat melakukan validasi karena data terstruktur gagal dibuat.",
+            "detail_error": data_terstruktur.get("error")
+        }
+
+    field_terisi = []
+    field_kosong = []
+
+    for field in FIELD_WAJIB:
+        # Cek apakah field ada di data dan nilainya tidak kosong/hanya spasi
+        if field in data_terstruktur and str(data_terstruktur[field]).strip():
+            field_terisi.append(field)
         else:
-            return {"error": "Tidak ada blok JSON valid di respons LLM.", "raw_response": response_text}
+            field_kosong.append(field)
 
-    except Exception as e:
-        # Kita juga hapus print dari sini
-        return {"error": f"Kesalahan tidak terduga: {e}", "raw_response": json_text_untuk_debug}
+    # Tentukan status akhir berdasarkan apakah ada field yang kosong
+    status_akhir = "LENGKAP" if not field_kosong else "TIDAK LENGKAP"
+
+    return {
+        "status": status_akhir,
+        "field_wajib": FIELD_WAJIB,
+        "field_terisi": field_terisi,
+        "field_kosong": field_kosong
+    }
+
+def deteksi_tipe_dokumen_dari_hasil_ai(data_terstruktur: dict, nama_file_pdf: str) -> str:
+    """
+    Mendeteksi tipe dokumen (BAUT/BACT) dengan prioritas pada hasil ekstraksi AI,
+    dan menggunakan nama file sebagai cadangan.
+    """
+    # --- STRATEGI 1: Cari di Hasil Ekstraksi AI (Paling Akurat) ---
+    # Kita cari field yang kemungkinan berisi judul, misal: 'SECTION', 'Tipe_Dokumen', 'JUDUL'
+    # (Sesuaikan nama field ini dengan output JSON Impian kita)
+    
+    # Gabungkan semua nilai teks yang mungkin relevan dari hasil AI
+    teks_untuk_diperiksa = ""
+    if "SECTION" in data_terstruktur:
+        teks_untuk_diperiksa += " " + str(data_terstruktur["SECTION"]).upper()
+    if "Tipe_Dokumen" in data_terstruktur:
+        teks_untuk_diperiksa += " " + str(data_terstruktur["Tipe_Dokumen"]).upper()
+    
+    # Cek frasa kunci di teks yang diekstrak
+    if "COMMISSIONING TEST" in teks_untuk_diperiksa or "BACT" in teks_untuk_diperiksa or "BATC" in teks_untuk_diperiksa:
+        return "BACT"
+    if "UJI TERIMA" in teks_untuk_diperiksa or "BAUT" in teks_untuk_diperiksa:
+        return "BAUT"
+
+    # --- STRATEGI 2: Cek Nama File (Cadangan) ---
+    nama_file_upper = nama_file_pdf.upper()
+    if "BACT" in nama_file_upper or "BATC" in nama_file_upper:
+        return "BACT"
+    if "BAUT" in nama_file_upper:
+        return "BAUT"
+        
+    # --- Fallback Terakhir ---
+    return "UMUM"
