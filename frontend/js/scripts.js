@@ -10,10 +10,15 @@ const progressBar = document.getElementById("progressBar");
 const progressText = document.getElementById("progressText");
 
 // Pengaturan URL API Dinamis
-const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-const API_URL = IS_LOCAL 
-    ? 'http://localhost:8000' 
-    : 'https://api-domain-anda.com'; // Ganti dengan URL produksi
+// const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+// const API_URL = IS_LOCAL 
+//     ? 'http://localhost:8000' 
+//     : 'https://electrosynthetic-agreeably-lovie.ngrok-free.dev/'; // Ganti dengan URL produksi
+
+// console.log('API URL yang digunakan:', API_URL);
+
+const API_URL = 'https://electrosynthetic-agreeably-lovie.ngrok-free.dev/'
+console.log('API URL yang digunakan:', API_URL);
 
 // Fungsi untuk menampilkan pesan
 function showMessage(htmlContent, type) {
