@@ -11,22 +11,9 @@ pytesseract
 opencv-python-headless
 json_repair
 
-# AI & Machine Learning (Umum)
-# torch, transformers, dan datasets adalah inti untuk LayoutLMv3 dan IndoBERT
+# AI & Machine Learning
 torch
 transformers
-datasets
-seqeval
-
-# AI - Spesifik Model (LayoutLMv3 & Tokenizer)
 sentencepiece
-timm
-protobuf
-
-# Utilitas Training & Development
-# accelerate: Untuk mengoptimalkan dan mempercepat proses training Hugging Face
-# tensorboard: Untuk visualisasi dan monitoring proses training model
-# python-dotenv: Untuk memuat environment variables (misal: dari file .env) saat development lokal
 accelerate
-tensorboard
-python-dotenv
+timm
